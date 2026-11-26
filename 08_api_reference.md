@@ -800,7 +800,7 @@ PJOIN 연결만 해제하고 원격 GitHub 저장소는 유지합니다.
 - **관련 화면** S10, S12 · F13, F16, F17
 - **요청 본문** permission (예: pull; PR 작성이 필요하면 push 검토)
 - **대표 성공 응답** 201 Pending / 204일 때 실제 permission 재조회
-- **검증·동작** 원격 201은 초대 생성일 뿐 수락 완료가 아닙니다. ACTIVE는 permission API에서 접근 확인 후로 정의하는 안. 초대 DB 테이블은 ERD 신규 제안.
+- **검증·동작** 원격 201은 초대 생성일 뿐 수락 완료가 아닙니다. ACTIVE는 permission API에서 실제 접근을 확인한 뒤 반환합니다. 초대 이력은 별도 테이블에 저장하지 않습니다.
 - **계약 메모** GitHub의 204는 P Join의 응답 코드로 확정돼 있지 않습니다. GitHub가 204를 반환한 경우 서버에서 실제 권한을 재조회합니다.
 - **오류 응답** `401` P Join 인증 필요 · `403` `PROJECT_FORBIDDEN` 프로젝트 권한 부족 · `502` `GITHUB_UNAVAILABLE` GitHub 저장소 요청 실패
 
@@ -1094,12 +1094,12 @@ GitHub 최신 상태와 승인 게이트를 재검증한 뒤 병합합니다.
 
 기존 구조는 [07_erd.md](07_erd.md)를 참고합니다. 아래에는 카탈로그에서 검토 중인 모델을 정리합니다.
 
-- **github_repositories** `githubRepositoryId` BIGINT UNIQUE 필수, `htmlUrl`, `visibility`, `createdAt/updatedAt`를 추가 제안합니다. `projectId` UNIQUE는 프로젝트당 저장소 1개 정책 확인 후 확정합니다. ETag와 토큰은 이 테이블에 저장하지 않습니다.
-- **pull_requests** `authorLogin` 필수 스냅샷, `syncedAt`, UNIQUE(`repositoryId`, `githubPrNumber`) 및 상태·갱신시각 인덱스를 제안합니다. `authorId`는 PJOIN 사용자 매핑 시에만 저장합니다.
-- **pull_request_reviews** `githubReviewId` UNIQUE, `reviewerLogin`, `reviewedCommitSha`, `syncedAt`를 추가 제안합니다. `reviewerId`는 nullable입니다. 중복 webhook은 원격 ID 기준 upsert합니다.
+- **project_tech_stacks** 프로젝트와 기술 카탈로그 사이의 다대다 연결입니다. `(projectId, techStackId)` 복합 PK와 `displayOrder`를 사용합니다. API의 `techStackIds`는 이 관계에 행으로 저장합니다.
+- **github_repositories** `githubRepositoryId` UNIQUE, `htmlUrl`, `visibility`, `createdAt/updatedAt`를 둡니다. `projectId`도 UNIQUE로 프로젝트당 연결 하나를 보장합니다. ETag와 토큰은 이 테이블에 저장하지 않습니다.
+- **pull_requests** `authorLogin` 필수 스냅샷, `syncedAt`, UNIQUE(`repositoryId`, `githubPrNumber`) 및 상태·갱신시각 인덱스를 둡니다. `authorUserId`는 users FK입니다.
+- **pull_request_reviews** `githubReviewId` UNIQUE, `reviewerLogin`, `reviewedCommitSha`, `syncedAt`를 둡니다. `reviewerUserId`는 users FK입니다. 중복 webhook은 원격 ID 기준 upsert합니다.
 - **applications** 기존 필드: `applicationId`, `projectId`, `applicantId`, `comment`, `privacyConsentAt`, `status`, `handledByUserId`, `handledAt`, 생성·수정 시각.
 - **project_members** 복합 PK `(projectId, userId)`, `role`, `joinedAt`. 역할 값, 팀 탈퇴·강퇴·소유권 이전 정책은 ERD에 없으므로 관련 APIs는 검토 초안입니다.
-- **github_repository_invitations** ERD에는 없는 테이블입니다. GitHub 초대와 실제 접근 권한을 구분하기 위해 invitation ID, 저장소·신청 FK, 원격 user/invitation ID, requestedPermission, invitationStatus, invitedAt, accessConfirmedAt, lastCheckedAt, lastError를 제안합니다.
 
 <a id="open-decisions"></a>
 
@@ -1110,8 +1110,8 @@ GitHub 최신 상태와 승인 게이트를 재검증한 뒤 병합합니다.
 - **저장소 연결과 교체 정책** 후보 목록은 `/github/repositories`로 정리했습니다. `PUT …/github/repository`로 연결할 때 기존 연결을 교체할 수 있는 조건은 팀 확인이 필요합니다.
 - **PR 병합 정책** PR 상세·리뷰·병합 경로는 `{prNumber}`를 사용합니다. GH-11의 PUT과 `expectedHeadSha`를 기준으로, 병합 권한과 허용할 병합 방식을 팀에서 정해야 합니다.
 - **Projects 스키마·상태** `version`, `deletedAt`, 상태 전이 및 모집 기간과 lifecycleStatus 관계는 추가 제안입니다. 모집 상태를 종료 상태와 분리할지 합의가 필요합니다.
-- **ERD와 API 필드 불일치** Users API의 `avatarUrl`·`websiteUrl`은 ERD의 `profileImageUrl`과 다릅니다. Notifications API는 `message`·`targetUrl`을 쓰지만 ERD는 `actorId`·`targetType`·`targetId`·`expiresAt`을 둡니다. S11 Schedule은 `scheduledAt/link`, ERD는 `startsAt/endsAt/meetingUrl`입니다. Issues는 API `state`와 ERD `status`를 매핑해야 합니다.
-- **ERD 관계와 보존 정책** 프로젝트당 GitHub 저장소 수, disconnect 후 PR/리뷰 데이터 보존, 승인 인원·자격, applications 중복 지원 제약, 멤버/owner 전환 및 연관 데이터 삭제를 확정해야 합니다.
-- **GitHub invitation storage** GitHub 저장소 명세는 `github_repository_invitations` 테이블을 신규 제안합니다. `invitationId`, repository/application FK, githubInvitationId, githubUserId/login, requestedPermission, invitationStatus, invitedAt, accessConfirmedAt, lastCheckedAt, lastError와 UNIQUE(repositoryId,githubUserId)를 팀에서 승인해야 합니다.
+- **ERD와 API 필드 불일치** Users API의 `avatarUrl`은 ERD의 `profile_image_key`로 만든 공개 URL입니다. `websiteUrl`과 `portfolio_url`의 매핑은 확정이 필요합니다. Notifications API는 `message`·`targetUrl`을 쓰지만 ERD는 `actorId`·`targetType`·`targetId`·`expiresAt`을 둡니다. S11 Schedule은 `scheduledAt/link`, ERD는 `startsAt/endsAt/meetingUrl`입니다.
+- **ERD 관계와 보존 정책** 프로젝트당 GitHub 저장소 연결은 하나입니다. disconnect 후 PR/리뷰 데이터 보존, 승인 인원·자격, applications 중복 지원 제약, 멤버/owner 전환 및 연관 데이터 삭제를 확정해야 합니다.
+- **GitHub 초대 상태 보존** 초대 상태는 GitHub API에서 실시간 조회하며 ERD에 별도 초대 테이블을 두지 않습니다. 장기 이력이 필요해지면 `project_members` 확장을 별도로 검토합니다.
 - **REST·GraphQL 및 캐시** REST를 기본으로 하고 GraphQL은 측정된 병목에서만 검토합니다. ETag/If-None-Match와 304, `Retry-After` 우선·제한된 지수 backoff, webhook HMAC·delivery 중복 방지를 적용합니다. SHA-256은 cache key 용도, HMAC-SHA256은 webhook 서명 검증 용도이며 서로 대체할 수 없습니다.
 - **응답 필드·삭제·만료 정책** Notifications API의 읽음 전용 삭제와 30일 만료, 프로젝트 논리 삭제, disconnected 저장소의 데이터 보존 및 Schedules 물리 삭제 규칙을 실제 FK/운영 정책과 맞춰야 합니다.
