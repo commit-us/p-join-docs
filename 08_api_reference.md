@@ -12,10 +12,26 @@ P Join의 팀 검토용 HTTP API 설계입니다. 요청·응답 필드, 예시�
 
 ## 공통 API 계약
 
-- 일반 API는 `/api`, S14 GitHub API는 `/api/v1`을 사용합니다. S11·S13 명세에는 루트 상대 경로가 포함됩니다. 배포 호스트와 경로 표준은 팀 합의 항목입니다.
-- Users·Notifications는 HttpOnly 세션 쿠키를 제안합니다. Users 명세는 Express 세션과 PostgreSQL 저장소를 제안합니다. 상태 변경에는 CSRF 토큰과 Origin 검사를 적용하는 안입니다.
-- 북마크·좋아요의 공통 인증은 미정입니다. GitHub App 설치 토큰은 서버에 보관하고, 웹훅은 HMAC 서명을 검증합니다.
-- 응답 및 오류 형식은 도메인별 명세를 따릅니다. 공통 형식은 팀 합의 항목입니다.
+> **팀 합의 완료 (2026-11-25)** 아래 인증·보안·오류·세션 처리 규칙은 P Join의 **내부 API 전체에 적용하는 공통 계약**입니다. 개별 API의 이전 예시와 충돌하면 이 공통 계약을 우선하며, 카탈로그의 상세 예시도 이에 맞춰 동기화해야 합니다.
+
+- **경로 표준 (미확정)** 일반 API는 `/api`, S14 GitHub API는 `/api/v1`을 사용합니다. S11·S13 명세에는 루트 상대 경로가 포함됩니다. 배포 호스트와 경로 표준은 별도 팀 합의 항목입니다.
+- **① 인증 방식 (확정)** 로그인 필수인 모든 P Join API(프로젝트·지원·멤버·북마크·좋아요·알림·GitHub 연동 API 포함)는 **HttpOnly 세션 쿠키**로 인증합니다. 공개 API는 비로그인 접근을 허용합니다. Express 세션과 PostgreSQL 세션 저장소는 기존 구현 제안으로 유지합니다. GitHub App 설치 토큰은 서버에만 보관하며 브라우저에 전달하지 않습니다.
+- **② CSRF 보호 (확정)** 세션 쿠키를 사용하는 상태 변경 요청(`POST`·`PUT`·`PATCH`·`DELETE`)은 **CSRF 토큰과 Origin 검증**을 적용합니다. OAuth 콜백은 `state`, GitHub 웹훅은 `X-Hub-Signature-256` HMAC 등 전용 검증을 사용합니다. 실제 발급·전달 방법과 토큰 헤더명은 구현 단계에서 상세 계약을 확정합니다.
+- **③ 인증·인가 오류 (확정)** 세션이 없거나 만료된 경우 **HTTP 401 + `UNAUTHENTICATED`**, 로그인은 됐으나 작업 권한이 없는 경우 **HTTP 403 + `FORBIDDEN`**을 사용합니다. 로그인 실패 시의 `INVALID_CREDENTIALS` 같은 개별 도메인 오류는 별개로 유지합니다. 리소스 존재 여부를 공개하면 안 되는 경우에는 정책에 따라 404를 사용할 수 있습니다.
+- **④ 오류 응답 JSON (확정)** P Join 내부 API의 오류 응답은 `{"error":{"code":"...","message":"...","requestId":"..."}}` 형태로 통일합니다. `requestId`는 선택 필드입니다. **성공 응답 형식**과 **외부 GitHub REST API의 원본 응답**은 이 결정의 대상이 아닙니다.
+- **⑥ 세션 만료 및 작성 중 데이터 (확정)** 비활동 만료 24시간·절대 만료 7일을 기존 정책으로 유지하고, 자동 Polling은 비활동 시간을 갱신하지 않습니다. 인증이 필요한 저장 요청에 401이 오면 프론트엔드는 **작성 중인 입력값을 보존하고 재로그인을 안내**합니다. 재로그인 후 최신 데이터·권한을 확인하고 **사용자가 다시 저장**하도록 하며, 변경 요청을 무조건 자동 재전송하지 않습니다. 화면 이동·새로고침을 넘는 초안 보존 방법은 프론트엔드 구현에서 별도로 정합니다.
+
+**공통 오류 응답 예시**
+
+```json
+{
+  "error": {
+    "code": "FORBIDDEN",
+    "message": "접근 권한이 없습니다.",
+    "requestId": "req_123"
+  }
+}
+```
 
 <a id="endpoint-list"></a>
 
@@ -74,8 +90,8 @@ loginId와 비밀번호로 세션을 시작합니다.
 - **권한** 로그인 필요
 - **명세** 문서 제안
 - **대표 성공 응답** 200 {id,loginId,nickname}
-- **검증·동작** 비활동 24시간·절대 만료 7일. 자동 polling은 비활동 시간을 갱신하지 않습니다. 401 UNAUTHORIZED.
-- **오류 응답** `401` `UNAUTHORIZED`
+- **검증·동작** 비활동 24시간·절대 만료 7일. 자동 polling은 비활동 시간을 갱신하지 않습니다. 401 UNAUTHENTICATED.
+- **오류 응답** `401` `UNAUTHENTICATED`
 
 #### `GET /api/users/me` · 내 프로필 조회
 
@@ -84,8 +100,8 @@ loginId와 비밀번호로 세션을 시작합니다.
 - **권한** 로그인 필요
 - **명세** 문서 제안
 - **대표 성공 응답** 200 {id,loginId,email,nickname,bio,avatarUrl,websiteUrl}
-- **검증·동작** 본인 프로필만 조회. 401 UNAUTHORIZED.
-- **오류 응답** `401` `UNAUTHORIZED`
+- **검증·동작** 본인 프로필만 조회. 401 UNAUTHENTICATED.
+- **오류 응답** `401` `UNAUTHENTICATED`
 
 #### `GET /users/{userId}` · 사용자 공개 프로필
 
@@ -109,7 +125,7 @@ loginId와 비밀번호로 세션을 시작합니다.
 - **대표 성공 응답** 200 수정된 프로필
 - **검증·동작** nickname 2–20자 고유, bio 최대 500자, websiteUrl은 HTTP(S). 다른 필드는 거부. 400 INVALID_INPUT · 409 DUPLICATE_NICKNAME.
 - **계약 메모** 수정 응답은 내 프로필 조회와 같은 형태로 예시를 구성했습니다. 프로필 필드의 null·초기화 규칙은 명세에서 확인이 필요합니다.
-- **오류 응답** `400` `INVALID_INPUT` · `401` `UNAUTHORIZED` · `409` `DUPLICATE_NICKNAME`
+- **오류 응답** `400` `INVALID_INPUT` · `401` `UNAUTHENTICATED` · `409` `DUPLICATE_NICKNAME`
 
 #### `POST /api/users/me/avatar` · 프로필 사진 등록·변경
 
@@ -120,7 +136,7 @@ loginId와 비밀번호로 세션을 시작합니다.
 - **요청 본문** multipart image (PNG/JPG, ≤5 MB)
 - **대표 성공 응답** 200 {avatarUrl}
 - **검증·동작** 실제 MIME·시그니처 검증, 이미지 재인코딩, 안전한 무작위 파일명. 400 INVALID_FILE · 413 FILE_TOO_LARGE.
-- **오류 응답** `400` `INVALID_FILE` · `401` `UNAUTHORIZED` · `413` `FILE_TOO_LARGE`
+- **오류 응답** `400` `INVALID_FILE` · `401` `UNAUTHENTICATED` · `413` `FILE_TOO_LARGE`
 
 #### `PATCH /api/users/me/password` · 비밀번호 변경
 
@@ -132,7 +148,7 @@ loginId와 비밀번호로 세션을 시작합니다.
 - **대표 성공 응답** 204 + 세션 쿠키 삭제
 - **검증·동작** 8–128자, 기존 값과 달라야 함. authVersion 증가를 원자 처리해 모든 기존 세션 무효화. 400 INVALID_INPUT / INVALID_CURRENT_PASSWORD / SAME_PASSWORD.
 - **계약 메모** 비밀번호 요청 필드명은 기존 통합안 표기를 사용합니다.
-- **오류 응답** `400` `INVALID_INPUT · INVALID_CURRENT_PASSWORD · SAME_PASSWORD` · `401` `UNAUTHORIZED`
+- **오류 응답** `400` `INVALID_INPUT · INVALID_CURRENT_PASSWORD · SAME_PASSWORD` · `401` `UNAUTHENTICATED`
 
 #### `GET /api/users/me/github` · 내 GitHub 계정 연결 상태 조회
 
@@ -143,7 +159,7 @@ loginId와 비밀번호로 세션을 시작합니다.
 - **관련 화면** S05 · F17
 - **대표 성공 응답** 200 {status,account}
 - **검증·동작** 계정 연결과 프로젝트별 저장소 연결 상태는 별도로 조회합니다.
-- **오류 응답** `401` `UNAUTHORIZED`
+- **오류 응답** `401` `UNAUTHENTICATED`
 
 #### `GET /api/users/me/github/connect` · 내 GitHub 계정 연결 시작
 
@@ -155,7 +171,7 @@ loginId와 비밀번호로 세션을 시작합니다.
 - **대표 성공 응답** 302 Location
 - **검증·동작** 계정 연동 방식이 결정되면 콜백 경로를 명세합니다.
 - **계약 메모** 로그인한 사용자가 이 경로로 이동하면 GitHub 계정 연결을 시작합니다. 콜백 경로는 계정 연동 방식이 결정되면 명세합니다.
-- **오류 응답** `401` `UNAUTHORIZED`
+- **오류 응답** `401` `UNAUTHENTICATED`
 
 #### `DELETE /api/users/me/github` · 내 GitHub 계정 연결 해제
 
@@ -167,7 +183,7 @@ loginId와 비밀번호로 세션을 시작합니다.
 - **대표 성공 응답** 204 No Content
 - **검증·동작** 사용자가 해제를 확인한 뒤 호출합니다.
 - **계약 메모** 현재 사용자의 계정 연결을 해제합니다. 프로젝트 저장소 연결·해제는 프로젝트별 저장소 API가 담당합니다.
-- **오류 응답** `401` `UNAUTHORIZED`
+- **오류 응답** `401` `UNAUTHENTICATED`
 
 <a id="api-group-2"></a>
 
@@ -204,6 +220,7 @@ loginId와 비밀번호로 세션을 시작합니다.
 - **명세** 문서 제안
 - **관련 화면** S02 · F07–F09
 - **대표 성공 응답** 200 프로젝트 + owner + likeCount
+- **⑤ 소유자 공개 정보 (팀 합의 완료)** 응답의 `owner`는 `{ userId: UUID, nickname: string, avatarUrl: string | null }`을 포함합니다. 프로필 사진이 없으면 `avatarUrl: null`을 반환하며, 이메일·로그인 ID·비밀번호 해시 등 비공개 계정 정보는 포함하지 않습니다. 비로그인 사용자에게도 같은 공개 정보를 제공합니다.
 - **검증·동작** 로그인 여부와 관계없이 같은 응답을 반환합니다. 스택은 displayOrder 오름차순. 400 INVALID_PROJECT_ID · 404 PROJECT_NOT_FOUND.
 - **계약 메모** 로그인 여부와 관계없이 같은 공개 필드를 반환합니다. 좋아요·북마크·지원의 내 상태는 로그인한 경우 프로젝트별 내 상태 조회에서 가져옵니다.
 - **오류 응답** `400` `INVALID_PROJECT_ID` · `404` `PROJECT_NOT_FOUND`
@@ -520,8 +537,8 @@ OWNER가 멤버의 role을 변경합니다.
 - **관련 화면** S15 · F20
 - **쿼리** page=1, limit=20, filter=all|unread
 - **대표 성공 응답** 200 {items,page,limit,total}
-- **검증·동작** Polling 30–60초. 자동 조회는 세션 비활동 타이머를 갱신하지 않습니다. 400 INVALID_QUERY · 401 UNAUTHORIZED.
-- **오류 응답** `400` `INVALID_QUERY` · `401` `UNAUTHORIZED`
+- **검증·동작** Polling 30–60초. 자동 조회는 세션 비활동 타이머를 갱신하지 않습니다. 400 INVALID_QUERY · 401 UNAUTHENTICATED.
+- **오류 응답** `400` `INVALID_QUERY` · `401` `UNAUTHENTICATED`
 
 #### `GET /api/notifications/unread-count` · 미확인 알림 수
 
@@ -531,8 +548,8 @@ OWNER가 멤버의 role을 변경합니다.
 - **명세** 문서 제안
 - **관련 화면** S15 · F20
 - **대표 성공 응답** 200 {count:number}
-- **검증·동작** 자동 polling은 세션 활동 시각 갱신에서 제외. 401 UNAUTHORIZED.
-- **오류 응답** `401` `UNAUTHORIZED`
+- **검증·동작** 자동 polling은 세션 활동 시각 갱신에서 제외. 401 UNAUTHENTICATED.
+- **오류 응답** `401` `UNAUTHENTICATED`
 
 #### `PATCH /api/notifications/{id}/read` · 알림 읽음 처리
 
@@ -544,7 +561,7 @@ OWNER가 멤버의 role을 변경합니다.
 - **대표 성공 응답** 200 {id,readAt,...}
 - **검증·동작** 반복 요청에도 최초 readAt 유지, 소유자 검사. 401 · 404 NOT_FOUND.
 - **계약 메모** 원문 예시가 명시한 id·readAt을 표시했습니다. 그 외 응답 필드는 원문에서 생략되어 있습니다.
-- **오류 응답** `401` `UNAUTHORIZED` · `404` `NOT_FOUND`
+- **오류 응답** `401` `UNAUTHENTICATED` · `404` `NOT_FOUND`
 
 #### `PATCH /api/notifications/read-all` · 알림 전체 읽음
 
@@ -554,8 +571,8 @@ OWNER가 멤버의 role을 변경합니다.
 - **명세** 문서 제안
 - **관련 화면** S15 · F20
 - **대표 성공 응답** 200 {updatedCount:number}
-- **검증·동작** userId와 readAt=null 조건으로 updateMany. 401 UNAUTHORIZED.
-- **오류 응답** `401` `UNAUTHORIZED`
+- **검증·동작** userId와 readAt=null 조건으로 updateMany. 401 UNAUTHENTICATED.
+- **오류 응답** `401` `UNAUTHENTICATED`
 
 #### `DELETE /api/notifications/{id}` · 읽은 알림 삭제
 
@@ -566,7 +583,7 @@ OWNER가 멤버의 role을 변경합니다.
 - **관련 화면** S15 · F20
 - **대표 성공 응답** 204 No Content
 - **검증·동작** 미확인 알림 삭제는 거부. 400 NOT_READ · 401 · 404 NOT_FOUND. 알림은 30일 후 정기 삭제 제안.
-- **오류 응답** `400` `NOT_READ` 미확인 알림 삭제 불가 · `401` `UNAUTHORIZED` · `404` `NOT_FOUND`
+- **오류 응답** `400` `NOT_READ` 미확인 알림 삭제 불가 · `401` `UNAUTHENTICATED` · `404` `NOT_FOUND`
 
 <a id="api-group-5"></a>
 
@@ -1105,7 +1122,7 @@ GitHub 최신 상태와 승인 게이트를 재검증한 뒤 병합합니다.
 
 ## 팀 합의 항목
 
-- **응답·오류 봉투와 인증** 세션 쿠키(Users), 미정 인증(북마크·좋아요), GitHub API의 Bearer 예제가 공존합니다. `{error:{code,message}}`, `{success,data,meta}`, 평면 JSON도 통일이 필요합니다.
+- **인증·오류 규칙 (합의 완료, 세부 명세 동기화 필요)** P Join 내부 보호 API의 HttpOnly 세션 쿠키, 상태 변경 시 CSRF·Origin 검증, 401 `UNAUTHENTICATED` / 403 `FORBIDDEN`, 오류 JSON `{error:{code,message,requestId?}}`로 확정했습니다. 카탈로그와 도메인별 기존 예시에 남은 Bearer·평면 오류·기타 오류 봉투 표현은 수정해야 합니다. **성공 응답 JSON 형식** 통일은 별도 미확정 항목입니다.
 - **경로 버전 및 회원관리** `/api`, `/api/v1`, 루트 상대 경로가 혼재합니다. Applications·Members의 세부 API는 ERD 기반 초안으로 제안했으며 상태값·역할·승인 권한이 필요합니다.
 - **저장소 연결과 교체 정책** 후보 목록은 `/github/repositories`로 정리했습니다. `PUT …/github/repository`로 연결할 때 기존 연결을 교체할 수 있는 조건은 팀 확인이 필요합니다.
 - **PR 병합 정책** PR 상세·리뷰·병합 경로는 `{prNumber}`를 사용합니다. GH-11의 PUT과 `expectedHeadSha`를 기준으로, 병합 권한과 허용할 병합 방식을 팀에서 정해야 합니다.
